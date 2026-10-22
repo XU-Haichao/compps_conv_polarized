@@ -48,7 +48,7 @@ c  10: redshift
       implicit none
       integer np,i,i1,nem
       PARAMETER(nem=5000) 
-      PARAMETER(np=10)
+      PARAMETER(np=11)
       integer ne,Ifl 
       real :: param(*),ear(0:ne),photer(ne),photar(ne)
       real :: pa0(np)
@@ -71,10 +71,18 @@ c  10: redshift
       REAL, ALLOCATABLE :: ExtendEnergyArray(:),ExtendFlux(:)
       REAL, ALLOCATABLE :: ExtendFluxErr(:)
       
-      REAL(kind=8),ALLOCATABLE,SAVE::phcon(:),phref(:)
+      REAL(kind=8),ALLOCATABLE,SAVE::phcon(:),phqcon(:),phdown(:)
+      REAL(kind=8),ALLOCATABLE,SAVE::phqdown(:),phref(:)
       REAL(kind=8),ALLOCATABLE,SAVE::phblb(:),obj(:)
 
-      REAL(kind=8),ALLOCATABLE::spcon(:),spblb(:),spref(:)
+      REAL(kind=8),ALLOCATABLE::spcon(:),spqcon(:),spdown(:),spqdown(:)
+      REAL(kind=8),ALLOCATABLE::spblb(:),spref(:)
+
+c Last Q spectrum returned by the polarized companion entry point.
+      REAL :: qout(nem),idownout(nem),qdownout(nem)
+      INTEGER :: qout_ne
+      COMMON/MSQOUT/qout,idownout,qdownout,qout_ne
+      SAVE /MSQOUT/
 
       integer,save::ne_sav=0,nEtot_sav=0
       REAL,ALLOCATABLE,SAVE::ear_sav(:),photar_sav(:)
@@ -94,6 +102,7 @@ c  10: redshift
       end if
 
 c check if the parameters were changed  
+      fl0=.false.
       do i=1,np
          if(param(i).ne.pa0(i)) fl0=.true.
          pa0(i)=param(i)
@@ -194,10 +203,16 @@ c scattering fraction
 
       if(energiesChanged.or.(nEtot_sav.ne.nEtot))then
          if(allocated(phcon))deallocate(phcon)
+         if(allocated(phqcon))deallocate(phqcon)
+         if(allocated(phdown))deallocate(phdown)
+         if(allocated(phqdown))deallocate(phqdown)
          if(allocated(phblb))deallocate(phblb)
          if(allocated(phref))deallocate(phref)
          if(allocated(obj))deallocate(obj)
          allocate(phcon(nEtot))
+         allocate(phqcon(nEtot))
+         allocate(phdown(nEtot))
+         allocate(phqdown(nEtot))
          allocate(phblb(nEtot))
          allocate(phref(nEtot))
          allocate(obj(nEtot))
@@ -237,21 +252,31 @@ c scattering fraction
       endif
       
       
+      phnorm=1.0d0
       if(fl0.or.energiesChanged.or.spinChanged)then
-         call msismco(pac,obj,phcon,phblb,phref,nEtot,phnorm,
+         call msismco(pac,obj,phcon,phqcon,phdown,phqdown,phblb,phref,nEtot,phnorm,
      &        energiesChanged,spinChanged,spec_in,e_in,ne)
       endif
 
        if(allocated(spcon))deallocate(spcon)
+       if(allocated(spqcon))deallocate(spqcon)
+       if(allocated(spdown))deallocate(spdown)
+       if(allocated(spqdown))deallocate(spqdown)
        if(allocated(spblb))deallocate(spblb)
        if(allocated(spref))deallocate(spref)
        allocate(spcon(nEtot))
+       allocate(spqcon(nEtot))
+       allocate(spdown(nEtot))
+       allocate(spqdown(nEtot))
        allocate(spblb(nEtot))
        allocate(spref(nEtot))              
 
        do i=1,nEtot
           factor=(ExtendEnergyArray(i+1)-ExtendEnergyArray(i))*phnorm
           spcon(i)=phcon(i)*factor
+          spqcon(i)=phqcon(i)*factor
+          spdown(i)=phdown(i)*factor
+          spqdown(i)=phqdown(i)*factor
           spblb(i)=phblb(i)*factor
           spref(i)=phref(i)*factor
        enddo
@@ -269,6 +294,9 @@ c scattering fraction
              if(param(8).lt.0.) photar(i)=real(spblb(i1)*f_sc*phnorm)
              if(param(8).ge.0.) photar(i)=(1.0-f_sc)*photar(i)+
      &            f_sc*real((spblb(i1)+spcon(i1))*phnorm)
+             qout(i)=f_sc*real(spqcon(i1)*phnorm)
+             idownout(i)=f_sc*real(spdown(i1)*phnorm)
+             qdownout(i)=f_sc*real(spqdown(i1)*phnorm)
 !     if(param(8).ge.0.) photar(i)=real((spcon(i1))/phnorm)
           enddo
        ELSE
@@ -277,6 +305,9 @@ c scattering fraction
              if(param(8).lt.0.) photar(i)=0.0
              if(param(8).ge.0.) photar(i)=
      &            abs(f_sc)*real((spcon(i1))*phnorm)
+             qout(i)=abs(f_sc)*real(spqcon(i1)*phnorm)
+             idownout(i)=abs(f_sc)*real(spdown(i1)*phnorm)
+             qdownout(i)=abs(f_sc)*real(spqdown(i1)*phnorm)
           enddo
       ENDIF
 
@@ -284,15 +315,58 @@ c scattering fraction
          photar(i)=max(0.0,photar(i))
          IF(photar(i).ne.photar(i))write(*,*)i,photar(i)
       enddo
+      qout_ne=ne
 
 !       call dbinsrch(1.0d0,i,1.0d0*ear,ne+1)
 !       write(*,*)i,ear(i-1),ear(i),photar(i)/(ear(i)-ear(i-1))
       return
       end
 
+c*********************************************************************
+c Polarized convolution entry point.  PHOTI is identical to the public
+c scalar compPSc result; PHOTQ is the self-consistent Stokes-Q spectrum.
+c*********************************************************************
+      subroutine xscomppspolf(ear,ne,param,Ifl,photi,photq,photer)
+      implicit none
+      integer ne,Ifl,i,nem
+      PARAMETER(nem=5000)
+      real param(*),ear(0:ne),photi(ne),photq(ne),photer(ne)
+      real qout(nem),idownout(nem),qdownout(nem)
+      integer qout_ne
+      COMMON/MSQOUT/qout,idownout,qdownout,qout_ne
+      call xscomppscf(ear,ne,param,Ifl,photi,photer)
+      if(qout_ne.ne.ne) stop 'xscomppspolf: inconsistent Q output size'
+      do i=1,ne
+         photq(i)=qout(i)
+      enddo
+      return
+      end
+
+c Four-spectrum standalone interface used by the project comparison:
+c angle-resolved upper/lower I and Q in one deterministic solve.
+      subroutine xscomppspol2f(ear,ne,param,Ifl,photiup,photqup,
+     &      photidown,photqdown,photer)
+      implicit none
+      integer ne,Ifl,i,nem,qout_ne
+      PARAMETER(nem=5000)
+      real param(*),ear(0:ne),photiup(ne),photqup(ne)
+      real photidown(ne),photqdown(ne),photer(ne)
+      real qout(nem),idownout(nem),qdownout(nem)
+      COMMON/MSQOUT/qout,idownout,qdownout,qout_ne
+      call xscomppscf(ear,ne,param,Ifl,photiup,photer)
+      if(qout_ne.ne.ne) stop 'xscomppspol2f: inconsistent output size'
+      do i=1,ne
+         photqup(i)=qout(i)
+         photidown(i)=idownout(i)
+         photqdown(i)=qdownout(i)
+      enddo
+      return
+      end
+
       
 c********************************************************************* 
-      SUBROUTINE MSISMCO(PARM,OBJ,PHCON,PHBLB,PHREF,NE,PHNORM,FLAGFRE, 
+      SUBROUTINE MSISMCO(PARM,OBJ,PHCON,PHQCON,PHDOWN,PHQDOWN,
+     &      PHBLB,PHREF,NE,PHNORM,FLAGFRE,
      &      FLAGSPNC,spec_in,e_in,ne_in)
 c********************************************************************* 
 c this program calculates the photon flux 
@@ -320,16 +394,19 @@ c  t0taug    - ratio of the height to the radius of the cylinder
 c********************************************************************* 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
       INCLUDE 'mscomppsj.inc'
 
       integer NE,ne_in
 
       DOUBLE PRECISION DSPXX(MAXFRE),F2(MAXFRE),COMPTSP(MAXFRE)
+      DOUBLE PRECISION QCOMPTSP(MAXFRE),DOWNCOMPTSP(MAXFRE)
+      DOUBLE PRECISION QDOWNCOMPTSP(MAXFRE)
       DOUBLE PRECISION BLBAVE(MAXFRE),REFLSP(MAXFRE)
-      DOUBLE PRECISION PARM(10),FINT(MAXANG),pa0(10)
+      DOUBLE PRECISION PARM(11),FINT(MAXANG),pa0(11)
       DOUBLE PRECISION OBJ(NE)
-      DOUBLE PRECISION PHCON(NE),PHBLB(NE),PHREF(NE)
+      DOUBLE PRECISION PHCON(NE),PHQCON(NE),PHDOWN(NE),PHQDOWN(NE)
+      DOUBLE PRECISION PHBLB(NE),PHREF(NE)
       DOUBLE PRECISION spec_in(ne_in),e_in(0:ne_in),ear_xkev(0:MAXFRE)
       DOUBLE PRECISION de
 
@@ -341,12 +418,12 @@ c*********************************************************************
       INTEGER neold, igeold, inpold
       INTEGER i, iang, j, jx, k, l, n, nl
 
-      logical firstcall,flagfre,flagspnc,flagcs 
+      logical firstcall,flagfre,flagspnc,flagcs,flagview
 
       save    pa0, firstcall, neold, igeold
       save    comptsp, blbave, reflsp
 
-      data    pa0/10*9999./
+      data    pa0/11*9999./
       data    firstcall/.true./
       data    flagcs/.true./
       data    neold/0/,igeold/10/,inpold/10/  
@@ -358,7 +435,8 @@ C               cutoff (in units of electron rest mass)
 c XLMAX - maximum of the spectral range
 c          0.1 eV         50 MeV 
 !      DATA XLMIN/-6.7D0/,XLMAX/2.D0/
-      DATA XLMIN/-4.7084209D0/,XLMAX/0.29157910D0/
+c 1e-6--1e3 keV: the lower bound fully contains a 5 eV blackbody seed.
+      DATA XLMIN/-8.7084209D0/,XLMAX/0.29157910D0/
       DATA EPSREF/1D-6/
 
 C ************************************
@@ -366,7 +444,7 @@ C ************************************
 
 c EPSMIN accuracy of the spectrum computed 
 c XEMAX  maximum energy up to what accuracy is checked 
-      EPSMIN=3.D-3
+      EPSMIN=1.D-7
       XEMAX=2.D0 
 
 
@@ -415,7 +493,7 @@ c hybrid
          endif
       endif
       if ( IDISTF .EQ. 0 .OR. IDISTF .EQ. 3 ) THEN
-         if ( ABS(PARM(1)) .LE. 1.0 ) THEN
+         if ( ABS(PARM(1)) .LE. 0.0 ) THEN
             CALL xwrite("COMPPS: kTe too small",5)
             WRITE(comment, '(2(a,1pg14.7))')"kTe too small =", PARM(1)
 
@@ -454,6 +532,8 @@ c This line added to suppress a compiler warning
 c tau=y/(4*Theta) 
          TAU=DABS(PARM(5)/(4D0*TE)) 
       ENDIF 
+      MAXSC=50+INT(4D0*TAU**2)
+      MAXSC=MAX(512,50+INT(20D0*TAU**2))
 C *****************************************       
 !     YPH=511D0/TPH
       YPH=511D0
@@ -521,7 +601,9 @@ c      ENDIF
 C NISO=0 - exact scattering process
 C NISO=1 - anisotropy for first 1,..ISOTR scatterings,
 C          for all other, isotropic TAU dependent source function
-      NISO=1
+c Polarized transfer must retain the full angle dependence at every order;
+c the scalar high-order isotropization shortcut does not carry Stokes Q.
+      NISO=0
 cjp000110
 c      IF(PARM(5).gt.0.) THEN 
 c      ISOTR=5 
@@ -535,10 +617,14 @@ c      ENDIF
          ISOTR=0 
       endif 
 
+c Viewing angle changes only the final interpolation, not slab transfer.
+      flagview=(pa0(8).NE.parm(8))
 c Compton spectral parameters have changed  
       flagcs = .false.
       do i = 1, 11
-         if ( (pa0(i) .NE. parm(i)).or.flagspnc) flagcs = .true.
+         if(i.ne.8) then
+            if ((pa0(i).NE.parm(i)).or.flagspnc) flagcs=.true.
+         endif
       enddo
 
       if(igeom.ne.igeold.or.input.ne.inpold) then 
@@ -559,6 +645,10 @@ c for any  other  injection - Gauss angular quadrature
 c set up internal arrays on first invocation of function
 
       if(firstcall) then 
+         ALLOCATE(FRDPP(LL,LL),FRDPM(LL,LL),FRDX(IPC,IPC),
+     &        FRDS(IPC,IPC),FRDMU(MAXFRE,MAXFRE,NMU),
+     &        FRDPP12(LL,LL),FRDPP21(LL,LL),FRDPP22(LL,LL),
+     &        FRDPM12(LL,LL),FRDPM21(LL,LL),FRDPM22(LL,LL))
 C NL    -  number of points in Gauss-Laguerre quadrature  
          NL=10
          CALL MSAGUEGALA(NL,EPS) 
@@ -693,7 +783,7 @@ c sphere : flux up
 
 C ****************************************************
 C case of slab, hemisphere or cylinder
-      if (flagcs) then
+      if (flagcs.or.flagview) then
          if (igeom.eq.1.or.igeom.eq.2.or.igeom.eq.3) then 
 
 c calculation of COMPTON SCATTERED FLUX at obs. grid 
@@ -702,10 +792,38 @@ c interpolation between angles to get N_nu=I_nu/nu at ETA
             DO I=1,MAXFRE
                DO IANG=1,MAXANG 
                   K=IANG+(I-1)*MAXANG 
-                  FINT(IANG)=DLOG(SUIPL(K)*UANG(IANG)+CMIN)
+                  FINT(IANG)=DLOG(SUIPL(K)+CMIN)
                ENDDO
                CALL MSPOLINTQ(UANG,FINT,MAXANG,ETA,FLY,DELY)
-               COMPTSP(I)=DEXP(FLY)
+               COMPTSP(I)=ETA*DEXP(FLY)
+            ENDDO
+
+c Stokes Q is signed, hence it must be interpolated linearly rather than
+c through log(Q).  SUIPL and QSUIPL are specific intensities; compPSc's
+c public slab spectrum includes the projected-area factor ETA.
+            DO I=1,MAXFRE
+               DO IANG=1,MAXANG
+                  K=IANG+(I-1)*MAXANG
+                  FINT(IANG)=QSUIPL(K)
+               ENDDO
+               CALL MSPOLQINTERP(UANG,FINT,MAXANG,ETA,FLY)
+               QCOMPTSP(I)=FLY*ETA
+            ENDDO
+
+c Angle-resolved radiation escaping through the lower slab surface.
+            DO I=1,MAXFRE
+               DO IANG=1,MAXANG
+                  K=IANG+(I-1)*MAXANG
+                  FINT(IANG)=DLOG(SUIMI(K)+CMIN)
+               ENDDO
+               CALL MSPOLINTQ(UANG,FINT,MAXANG,ETA,FLY,DELY)
+               DOWNCOMPTSP(I)=ETA*DEXP(FLY)
+               DO IANG=1,MAXANG
+                  K=IANG+(I-1)*MAXANG
+                  FINT(IANG)=QSUIMI(K)
+               ENDDO
+               CALL MSPOLQINTERP(UANG,FINT,MAXANG,ETA,FLY)
+               QDOWNCOMPTSP(I)=FLY*ETA
             ENDDO
 
 c calculation of BLACK BODY FLUX at obs. grid 
@@ -718,6 +836,13 @@ c interpolation between angles to get N_nu=I_nu/nu at ETA
                ENDDO
                CALL MSPOLINTQ(UANG,FINT,MAXANG,ETA,FLY,DELY)
                BLBAVE(I)=DEXP(FLY)
+c The bottom-injected unscattered slab beam is known exactly. A global
+c polynomial of log(mu*exp(-tau/mu)) badly distorts its angular integral.
+               IF(IGEOM.eq.1.and.IGROUND.eq.0.and.INPUT.eq.0) THEN
+                  BLBAVE(I)=0D0
+                  IF(ETA.gt.0D0) BLBAVE(I)=2D0*DINTEN(I)*ETA*
+     &                 DEXP(-TAU*S0(I)/ETA)
+               ENDIF
             ENDDO
             
          ELSE
@@ -736,7 +861,7 @@ C******************************************************
 C   remap from internal energies                      *
 C******************************************************
 
-      if(flagcs.or.flagfre.or.flagspnc) then
+      if(flagcs.or.flagview.or.flagfre.or.flagspnc) then
 c calculation of COMPTON SCATTERED FLUX at obs. grid 
          DO 170 I=1,MAXFRE
             DSPXX(I)=DLOG(COMPTSP(I)+CMIN)  
@@ -750,6 +875,19 @@ c calculation of COMPTON SCATTERED FLUX at obs. grid
                PHCON(I)=DEXP(YYY)/OBJ(I) 
             ENDIF 
  172     CONTINUE 
+c calculation of signed Stokes Q at obs. grid
+         DO I=1,MAXFRE
+            DSPXX(I)=QCOMPTSP(I)
+         ENDDO
+         CALL MSQSPLINE(XLOG,DSPXX,MAXFRE,1d30,1d30,F2)
+         DO I=1,NE
+            IF(OBJ(I).lt.XEN(1).or.OBJ(I).ge.XEN(MAXFRE)) THEN
+               PHQCON(I)=0D0
+            ELSE
+               CALL MSQSPLINT(XLOG,DSPXX,F2,MAXFRE,DLOG10(OBJ(I)),YYY)
+               PHQCON(I)=YYY/OBJ(I)
+            ENDIF
+         ENDDO
 c calculation of input for reflection at obs. grid 
          DO I=1,MAXFRE
             DSPXX(I)=DLOG(REFLSP(I)+CMIN)  
@@ -762,6 +900,31 @@ c calculation of input for reflection at obs. grid
                CALL MSQSPLINT(XLOG,DSPXX,F2,MAXFRE,DLOG10(OBJ(I)),YYY)
                PHREF(I)=DEXP(YYY)/OBJ(I) 
             ENDIF 
+         ENDDO
+c lower-surface I and Q at obs. grid
+         DO I=1,MAXFRE
+            DSPXX(I)=DLOG(DOWNCOMPTSP(I)+CMIN)
+         ENDDO
+         CALL MSQSPLINE(XLOG,DSPXX,MAXFRE,1d30,1d30,F2)
+         DO I=1,NE
+            IF(OBJ(I).lt.XEN(1).or.OBJ(I).ge.XEN(MAXFRE)) THEN
+               PHDOWN(I)=CMIN
+            ELSE
+               CALL MSQSPLINT(XLOG,DSPXX,F2,MAXFRE,DLOG10(OBJ(I)),YYY)
+               PHDOWN(I)=DEXP(YYY)/OBJ(I)
+            ENDIF
+         ENDDO
+         DO I=1,MAXFRE
+            DSPXX(I)=QDOWNCOMPTSP(I)
+         ENDDO
+         CALL MSQSPLINE(XLOG,DSPXX,MAXFRE,1d30,1d30,F2)
+         DO I=1,NE
+            IF(OBJ(I).lt.XEN(1).or.OBJ(I).ge.XEN(MAXFRE)) THEN
+               PHQDOWN(I)=0D0
+            ELSE
+               CALL MSQSPLINT(XLOG,DSPXX,F2,MAXFRE,DLOG10(OBJ(I)),YYY)
+               PHQDOWN(I)=YYY/OBJ(I)
+            ENDIF
          ENDDO
 c calculation of BLACK BODY FLUX at obs. grid 
          DO 174 I=1,MAXFRE 
@@ -803,16 +966,19 @@ C
 
       DOUBLE PRECISION TAU, T0TAUG, FILF1
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
-      DOUBLE PRECISION SOUPL(MAXTAU,LL),SOUMI(MAXTAU,LL), 
-     2 BGPL1(MAXTAU,MAXTAU,KK),BGMI1(MAXTAU,MAXTAU,KK),   
-     3 BGPL2(MAXTAU,MAXTAU,KK),BGMI2(MAXTAU,MAXTAU,KK), 
-     4 BGMIN(MAXTAU,MAXTAU,KK),BGMEX(MAXTAU,MAXTAU,KK), 
-     5 BGPLA(MAXTAU,MAXTAU,MAXFRE),BGMIA(MAXTAU,MAXTAU,MAXFRE),
-     6 BGMINA(MAXTAU,MAXTAU,MAXFRE)
+      DOUBLE PRECISION SOUPL(MAXTAU,LL),SOUMI(MAXTAU,LL)
+      DOUBLE PRECISION, ALLOCATABLE :: BGPL1(:,:,:),BGMI1(:,:,:)
+      DOUBLE PRECISION, ALLOCATABLE :: BGPL2(:,:,:),BGMI2(:,:,:)
+      DOUBLE PRECISION, ALLOCATABLE :: BGMIN(:,:,:),BGMEX(:,:,:)
+      DOUBLE PRECISION, ALLOCATABLE :: BGPLA(:,:,:),BGMIA(:,:,:)
+      DOUBLE PRECISION, ALLOCATABLE :: BGMINA(:,:,:)
       DOUBLE PRECISION TAUVEC(MAXTAU),SOUPL0(MAXTAU,LL),
      1 SOUMI0(MAXTAU,LL), DITAPL0(LL,MAXTAU),DITAMI0(LL,MAXTAU) 
+      DOUBLE PRECISION QSOUPL(MAXTAU,LL),QSOUMI(MAXTAU,LL)
+      DOUBLE PRECISION QSOUPL0(MAXTAU,LL),QSOUMI0(MAXTAU,LL)
+      DOUBLE PRECISION QDITAPL0(LL,MAXTAU),QDITAMI0(LL,MAXTAU)
       DOUBLE PRECISION SOISPL(MAXTAU,MAXFRE),SOISMI(MAXTAU,MAXFRE),
      1 DIAVER(MAXFRE,MAXTAU), DIFLUX(MAXFRE,MAXTAU) 
       DOUBLE PRECISION DINUP(LL),DINDO(LL)
@@ -826,8 +992,12 @@ C
       DOUBLE PRECISION DLN, DNORM, DSTA, DTT, FLPL, SINPI, DNTR
       DOUBLE PRECISION STA, sumneg, sumpos, T0TA2, TAUPI, TAURE
       DOUBLE PRECISION TAUSC, XPI
+      DOUBLE PRECISION SCAN_DIF
+      INTEGER SCAN_ORDER,SCAN_CAP
+      COMMON/MSSCANSTOP/SCAN_DIF,SCAN_ORDER,SCAN_CAP
 
       INTEGER IGEOLD,IGROLD
+      INTEGER NBGRID,NBK,NBF
       INTEGER IANG, ISC, ITAU, IX, JX, K, L
 
       DOUBLE PRECISION MSSINXX
@@ -842,11 +1012,44 @@ C
       data TAUOLD/9D9/,YOLD/-9D9/,FIL1OLD/9D9/,YPHOLD/-9D9/ 
       data T0TAUGOLD/9D9/,IGEOLD/10/,IGROLD/10/
 
+c The slab short-characteristic solver does not use dense spatial kernels.
+c Allocate legacy geometry kernels only when the selected path needs them.
+      NBGRID=1
+      NBK=1
+      NBF=1
+      IF((IGEOM.eq.1.and.IGROUND.ne.0).or.IGEOM.eq.2.or.
+     &     IGEOM.eq.3) THEN
+         NBGRID=MAXTAU
+         NBK=KK
+         NBF=MAXFRE
+      ENDIF
+      IF(ALLOCATED(BGPL1)) THEN
+         IF(SIZE(BGPL1,1).ne.NBGRID) THEN
+            DEALLOCATE(BGPL1,BGMI1,BGPL2,BGMI2,BGMIN,BGMEX,
+     &           BGPLA,BGMIA,BGMINA)
+         ENDIF
+      ENDIF
+      IF(.NOT.ALLOCATED(BGPL1)) THEN
+         ALLOCATE(BGPL1(NBGRID,NBGRID,NBK),BGMI1(NBGRID,NBGRID,NBK),
+     &        BGPL2(NBGRID,NBGRID,NBK),BGMI2(NBGRID,NBGRID,NBK),
+     &        BGMIN(NBGRID,NBGRID,NBK),BGMEX(NBGRID,NBGRID,NBK),
+     &        BGPLA(NBGRID,NBGRID,NBF),BGMIA(NBGRID,NBGRID,NBF),
+     &        BGMINA(NBGRID,NBGRID,NBF))
+      ENDIF
+
       DO 377 K=1,KK 
          SUIPL(K)=0D0 
          SUIMI(K)=0D0 
          DINTPL(K)=0D0
          DINTMI(K)=0D0
+         QSUIPL(K)=0D0
+         QSUIMI(K)=0D0
+         DO ITAU=1,MAXTAU
+            QSOUPL(ITAU,K)=0D0
+            QSOUMI(ITAU,K)=0D0
+            QSOUPL0(ITAU,K)=0D0
+            QSOUMI0(ITAU,K)=0D0
+         ENDDO
  377  CONTINUE 
 
       T0TA2=T0TAUG/2D0
@@ -863,7 +1066,8 @@ C
 c if not a SPHERE then
 c compute geometrical factors 
 c      if(IGEOM.ne.4) then
-      if(IGEOM.eq.1.or.IGEOM.eq.2.or.IGEOM.eq.3) then
+      if((IGEOM.eq.1.and.IGROUND.ne.0).or.IGEOM.eq.2.or.
+     &     IGEOM.eq.3) then
          if(IGEOM.ne.IGEOLD.or.T0TAUG.ne.T0TAUGOLD) then 
             CALL MSGEOMFAC(TAUVEC,T0TAUG,CINP,CINM,CEMP,CEMM)
          endif
@@ -944,16 +1148,22 @@ c not a sphere
                      SOUMI(ITAU,K)=0D0
                      SOUPL0(ITAU,K)=0D0
                      SOUMI0(ITAU,K)=0D0
+                     QSOUPL(ITAU,K)=0D0
+                     QSOUMI(ITAU,K)=0D0
+                     QSOUPL0(ITAU,K)=0D0
+                     QSOUMI0(ITAU,K)=0D0
  22               CONTINUE 
                   SOUPL(1,K)=0D0
                   SOUPL0(1,K)=UANG(IANG)*DINT*2D0/DELTAU
 c emergent black body radiation for delta(tau) injection (not sphere) 
                   FLPL=0D0 
+                  IF(IGEOM.ne.1.or.IGROUND.ne.0) THEN
                   DO 24 ITAU=1,MAXTAU
                      ATAU=1D0
                      IF(ITAU.eq.1.or.ITAU.eq.MAXTAU) ATAU=5D-1  
                      FLPL=FLPL+ATAU*BGPL2(1,ITAU,K)
  24               CONTINUE 
+                  ENDIF
                   DINTPL(K)=FLPL*DNTR/UANG(IANG)*DINT 
                ENDDO
             ENDDO
@@ -1027,6 +1237,8 @@ c sphere
                else
                   CALL MSEXAINT(SOUPL0,SOUMI0,DITAPL0,DITAMI0,DIAVER,
      &                 DIFLUX,BGPL1,BGMI1,BGMIN,DELTAU,FILF1,ISC)
+                  CALL MSEXAINTQ(QSOUPL0,QSOUMI0,QDITAPL0,QDITAMI0,
+     &                 BGPL1,BGMI1,BGMIN,DELTAU,FILF1,ISC)
                endif
             ELSE 
 c ISOTROPIC INTENSITIES    
@@ -1044,7 +1256,8 @@ c sphere
 c EXACT SOURCE FUNCTIONS
             IF(NISO.eq.0.or.ISC.lt.ISOTR) THEN 
                CALL MSEXASOUR(SOUPL,SOUMI,DITAPL0,DITAMI0,SOUPL0,SOUMI0,
-     &                      DIFMAX)     
+     &              QSOUPL,QSOUMI,QDITAPL0,QDITAMI0,QSOUPL0,QSOUMI0,
+     &              DIFMAX)
             ELSE
 c ISOTROPIC SOURCE FUNCTIONS dependent on TAU
                CALL MSISOSOUR(SOUPL,SOUMI,DIAVER,DIFLUX,SOISPL,SOISMI,
@@ -1063,6 +1276,9 @@ c escape probability (for sphere)
       ENDDO       
 c end of iteration procedure 
 c***************************
+      SCAN_DIF=DIFMAX
+      SCAN_ORDER=ISC-1
+      SCAN_CAP=MAXSC-1
       
 c emergent Comptonized radiation field through sides 
       IF(IGEOM.eq.2.or.IGEOM.eq.3) THEN 
@@ -1089,6 +1305,8 @@ c emergent Comptonized radiation field through sides
          DINTPL(K)=DINTPL(K)*DNORM
          SUIPL(K)=SUIPL(K)*DNORM 
          SUIMI(K)=SUIMI(K)*DNORM 
+         QSUIPL(K)=QSUIPL(K)*DNORM
+         QSUIMI(K)=QSUIMI(K)*DNORM
       enddo
 
 
@@ -1108,7 +1326,7 @@ c ESCAPE through the sides of hemisphere or cylinder
      &                   BGMI2,DINUP,DINDO) 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION SOUPL(MAXTAU,LL),SOUMI(MAXTAU,LL),DINUP(LL)
       DOUBLE PRECISION DINDO(LL),BGMEX(MAXTAU,MAXTAU,KK) 
@@ -1167,6 +1385,76 @@ c emergent side
 
       RETURN
       END
+
+c Shape-preserving interpolation for signed axisymmetric Q.  Rotational
+c symmetry imposes Q(mu=1)=0; the original global polynomial interpolation
+c does not preserve that endpoint and can create a spurious face-on signal.
+      SUBROUTINE MSPOLQINTERP(X,Y,N,X0,Y0)
+      IMPLICIT NONE
+      INTEGER N,J
+      DOUBLE PRECISION X(N),Y(N),X0,Y0,T
+      IF(X0.ge.X(N)) THEN
+         Y0=Y(N)*(1D0-X0)/(1D0-X(N))
+         RETURN
+      ENDIF
+      IF(X0.le.X(1)) THEN
+         T=(X0-X(1))/(X(2)-X(1))
+         Y0=Y(1)+T*(Y(2)-Y(1))
+         RETURN
+      ENDIF
+      DO J=1,N-1
+         IF(X0.ge.X(J).and.X0.le.X(J+1)) THEN
+            T=(X0-X(J))/(X(J+1)-X(J))
+            Y0=Y(J)+T*(Y(J+1)-Y(J))
+            RETURN
+         ENDIF
+      ENDDO
+      Y0=0D0
+      RETURN
+      END
+
+c Diagnostics for the polarized redistribution operator after MSCSRF.
+c ISOLEAK measures the spurious Q source generated from an angularly
+c isotropic, unpolarized field at fixed input energy.  POLBOUND checks that
+c an unpolarized pencil beam never produces |Q|>I in an integrated block.
+      SUBROUTINE COMP_POL_AUDIT(ISOLEAK,POLBOUND)
+      IMPLICIT NONE
+#include "mscomppsq.inc"
+      DOUBLE PRECISION ISOLEAK,POLBOUND,SQ,SI,DEN,RATIO,MAXB
+      INTEGER I,I1,J,J1,K,K1
+      ISOLEAK=0D0
+      POLBOUND=0D0
+      DO I=1,MAXFRE
+         DO J=1,MAXANG
+            K=J+(I-1)*MAXANG
+            DO I1=1,MAXFRE
+               SQ=0D0
+               SI=0D0
+               MAXB=0D0
+               DO J1=1,MAXANG
+                  K1=J1+(I1-1)*MAXANG
+                  MAXB=DMAX1(MAXB,FRDPP(K1,K),FRDPM(K1,K))
+               ENDDO
+               DO J1=1,MAXANG
+                  K1=J1+(I1-1)*MAXANG
+                  SQ=SQ+AANG(J1)*(FRDPP21(K1,K)+FRDPM21(K1,K))
+                  SI=SI+AANG(J1)*(FRDPP(K1,K)+FRDPM(K1,K))
+                  IF(FRDPP(K1,K).gt.MAXB*1D-10) THEN
+                     DEN=FRDPP(K1,K)
+                     POLBOUND=DMAX1(POLBOUND,DABS(FRDPP21(K1,K))/DEN)
+                  ENDIF
+                  IF(FRDPM(K1,K).gt.MAXB*1D-10) THEN
+                     DEN=FRDPM(K1,K)
+                     POLBOUND=DMAX1(POLBOUND,DABS(FRDPM21(K1,K))/DEN)
+                  ENDIF
+               ENDDO
+               RATIO=DABS(SQ)/DMAX1(1D-300,DABS(SI))
+               ISOLEAK=DMAX1(ISOLEAK,RATIO)
+            ENDDO
+         ENDDO
+      ENDDO
+      RETURN
+      END
 c***********************************************************************
 c for the escape probability (sphere) 
 c for angle averaged radiation field 
@@ -1175,7 +1463,7 @@ c emergent up-down and internal angle averaged radiation
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION TAU
       INTEGER ISC
@@ -1219,8 +1507,77 @@ c escape radiation
             endif
          ENDDO
       ENDDO
-      RETURN  
-      END     
+      RETURN
+      END
+c***********************************************************************
+c Exact propagation of a signed Stokes-Q source.  Free propagation and
+c attenuation are polarization blind, so this is the Q companion of
+c MSEXAINT.  It deliberately does not form scalar isotropic moments.
+      SUBROUTINE MSEXAINTQ(SOUPL0,SOUMI0,DITAPL0,DITAMI0,
+     &      BGPL1,BGMI1,BGMIN,DELTAU,FILF1,ISC)
+      IMPLICIT NONE
+#include "mscomppsq.inc"
+      DOUBLE PRECISION BGPL1(MAXTAU,MAXTAU,KK)
+      DOUBLE PRECISION BGMI1(MAXTAU,MAXTAU,KK)
+      DOUBLE PRECISION BGMIN(MAXTAU,MAXTAU,KK)
+      DOUBLE PRECISION SOUPL0(MAXTAU,LL),SOUMI0(MAXTAU,LL)
+      DOUBLE PRECISION DITAPL0(LL,MAXTAU),DITAMI0(LL,MAXTAU)
+      DOUBLE PRECISION DELTAU,FILF1,AT,EPTA,ETA,SUMI1,SUPL1
+      INTEGER ISC,IANG,IT,ITAU,IX,K,L,LTAU
+
+      IF(IGEOM.eq.1.and.IGROUND.eq.0) THEN
+         CALL MSSLABFORMAL(SOUPL0,SOUMI0,DITAPL0,DITAMI0,
+     &        DELTAU,ISC,1)
+         DO L=1,KK
+            IF(ISC.gt.1) QSUIPL(L)=QSUIPL(L)+DITAPL0(L,MAXTAU)
+            QSUIMI(L)=QSUIMI(L)+DITAMI0(L,1)
+         ENDDO
+         RETURN
+      ENDIF
+
+      DO IX=1,MAXFRE
+         DO IANG=1,MAXANG
+            K=IANG+(IX-1)*MAXANG
+            L=K
+            ETA=UANG(IANG)
+            EPTA=DELTAU/ETA
+            DO ITAU=1,MAXTAU
+               LTAU=MAXTAU-ITAU+1
+               SUPL1=0D0
+               IF(IGROUND.eq.2) THEN
+                  DO IT=1,MAXTAU
+                     AT=1D0
+                     IF(IT.eq.1.or.IT.eq.MAXTAU) AT=5D-1
+                     SUPL1=SUPL1+AT*SOUMI0(IT,L)*BGMIN(IT,ITAU,K)
+                  ENDDO
+                  SUPL1=SUPL1*FILF1
+               ENDIF
+               IF(ITAU.ne.1) THEN
+                  DO IT=1,ITAU
+                     AT=1D0
+                     IF(IT.eq.1.or.IT.eq.ITAU) AT=5D-1
+                     SUPL1=SUPL1+AT*SOUPL0(IT,L)*BGPL1(IT,ITAU,K)
+                  ENDDO
+               ENDIF
+               SUPL1=SUPL1*EPTA
+               SUMI1=0D0
+               IF(LTAU.ne.MAXTAU) THEN
+                  DO IT=LTAU,MAXTAU
+                     AT=1D0
+                     IF(IT.eq.LTAU.or.IT.eq.MAXTAU) AT=5D-1
+                     SUMI1=SUMI1+AT*SOUMI0(IT,L)*BGMI1(LTAU,IT,K)
+                  ENDDO
+                  SUMI1=SUMI1*EPTA
+               ENDIF
+               DITAPL0(L,ITAU)=SUPL1
+               DITAMI0(L,LTAU)=SUMI1
+            ENDDO
+            IF(ISC.gt.1) QSUIPL(L)=QSUIPL(L)+DITAPL0(L,MAXTAU)
+            QSUIMI(L)=QSUIMI(L)+DITAMI0(L,1)
+         ENDDO
+      ENDDO
+      RETURN
+      END
 c***********************************************************************
 c calculations of isotropic source function 
 c for escape probability
@@ -1228,7 +1585,7 @@ c for escape probability
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION SOISTR(MAXTAU,MAXFRE),DISOTR(MAXFRE,MAXTAU)
       DOUBLE PRECISION SOUPL(MAXTAU,LL),DIFMAX
@@ -1303,7 +1660,7 @@ c exact intensities for a spherical geometry
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION SOUPL0(MAXTAU,LL),SOUMI0(MAXTAU,LL), 
      1 DIAVER(MAXFRE,MAXTAU),DIFLUX(MAXFRE,MAXTAU), 
@@ -1484,7 +1841,7 @@ c emergent up-down and internal angle averaged radiation
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION SOISPL(MAXTAU,MAXFRE),SOISMI(MAXTAU,MAXFRE), 
      1 DIAVER(MAXFRE,MAXTAU),DIFLUX(MAXFRE,MAXTAU),TAUVEC(MAXTAU) 
@@ -1622,7 +1979,7 @@ c emergent up-down and internal angle averaged radiation
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION BGPL1(MAXTAU,MAXTAU,KK),BGMI1(MAXTAU,MAXTAU,KK),
      1 BGMIN(MAXTAU,MAXTAU,KK),BGMINA(MAXTAU,MAXTAU,MAXFRE),   
@@ -1716,7 +2073,7 @@ c***********************************************************************
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION BGPL1(MAXTAU,MAXTAU,KK),BGMI1(MAXTAU,MAXTAU,KK),
      1 BGMIN(MAXTAU,MAXTAU,KK),SOUPL0(MAXTAU,LL),SOUMI0(MAXTAU,LL), 
@@ -1730,7 +2087,21 @@ c***********************************************************************
 
       DOUBLE PRECISION CMIN
       DATA CMIN/1D-99/
-        
+
+      IF(IGEOM.eq.1.and.IGROUND.eq.0) THEN
+         CALL MSSLABFORMAL(SOUPL0,SOUMI0,DITAPL0,DITAMI0,
+     &        DELTAU,ISC,0)
+         DO L=1,KK
+            IF(ISC.eq.1) THEN
+               DINTPL(L)=DINTPL(L)+DITAPL0(L,MAXTAU)
+            ELSE
+               SUIPL(L)=SUIPL(L)+DITAPL0(L,MAXTAU)
+            ENDIF
+            SUIMI(L)=SUIMI(L)+DITAMI0(L,1)
+         ENDDO
+         GOTO 420
+      ENDIF
+
       DO IX=1,MAXFRE 
          DO IANG=1,MAXANG
             K=IANG+(IX-1)*MAXANG 
@@ -1782,7 +2153,7 @@ c emergent radiation field up-down
          ENDDO
       ENDDO
 
-      IF(NISO.eq.1.and.ISC.eq.ISOTR) THEN
+ 420  IF(NISO.eq.1.and.ISC.eq.ISOTR) THEN
          DO ITAU=1,MAXTAU
             DO IX=1,MAXFRE
                SPLTI=0D0
@@ -1807,7 +2178,7 @@ c calculations of isotropic source function
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION SOUPL(MAXTAU,LL),SOUMI(MAXTAU,LL), 
      1 SOISPL(MAXTAU,MAXFRE),SOISMI(MAXTAU,MAXFRE),
@@ -1854,46 +2225,63 @@ c     SOISTA(ITAU,IX)=SUMI*X/2D0
 c***********************************************************************
 c calculations of exact source function 
       SUBROUTINE MSEXASOUR(SOUPL,SOUMI,DITAPL0,DITAMI0,SOUPL0,SOUMI0,
-     &                   DIFMAX) 
+     &      QSOUPL,QSOUMI,QDITAPL0,QDITAMI0,QSOUPL0,QSOUMI0,DIFMAX)
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION SOUPL(MAXTAU,LL),SOUMI(MAXTAU,LL), 
      1 SOUPL0(MAXTAU,LL),SOUMI0(MAXTAU,LL), 
      2 DITAPL0(LL,MAXTAU),DITAMI0(LL,MAXTAU)    
+      DOUBLE PRECISION QSOUPL(MAXTAU,LL),QSOUMI(MAXTAU,LL)
+      DOUBLE PRECISION QSOUPL0(MAXTAU,LL),QSOUMI0(MAXTAU,LL)
+      DOUBLE PRECISION QDITAPL0(LL,MAXTAU),QDITAMI0(LL,MAXTAU)
 
       DOUBLE PRECISION DIFMAX, DIACMI, DIACPL, DIF, FRDPMEL, FRDPPEL
-      DOUBLE PRECISION X, XIMI, XIPL, XXMI, XXPL
+      DOUBLE PRECISION X, XIMI, XIPL, QXIMI, QXIPL, XXMI, XXPL
+      DOUBLE PRECISION QXXMI,QXXPL,QDIACMI,QDIACPL
+      DOUBLE PRECISION WI(LL,MAXTAU),WM(LL,MAXTAU)
+      DOUBLE PRECISION WQ(LL,MAXTAU),WQM(LL,MAXTAU)
+      DOUBLE PRECISION OI(LL,MAXTAU),OM(LL,MAXTAU)
+      DOUBLE PRECISION OQ(LL,MAXTAU),OQM(LL,MAXTAU)
 
       INTEGER IANG, ITAU, IX, JANG, JX, L, L1
 
+      DO ITAU=1,MAXTAU
+         DO L=1,LL
+            WI(L,ITAU)=DITAPL0(L,ITAU)*AC(L)
+            WM(L,ITAU)=DITAMI0(L,ITAU)*AC(L)
+            WQ(L,ITAU)=QDITAPL0(L,ITAU)*AC(L)
+            WQM(L,ITAU)=QDITAMI0(L,ITAU)*AC(L)
+         ENDDO
+      ENDDO
+      CALL MSPOLPRODUCT(FRDPP,FRDPM,FRDPP12,FRDPM12,
+     &     WI,WM,WQ,WQM,OI,OM)
+      CALL MSPOLPRODUCT(FRDPP21,FRDPM21,FRDPP22,FRDPM22,
+     &     WI,WM,WQ,WQM,OQ,OQM)
 
       DO IX=1,MAXFRE 
          X=XEN(IX) 
          DO IANG=1,MAXANG
             L=IANG+(IX-1)*MAXANG 
             DO 185 ITAU=1,MAXTAU
-               XIPL=0D0 
-               XIMI=0D0 
-               DO JX=1,MAXFRE 
-                  DO JANG=1,MAXANG
-                     L1=JANG+(JX-1)*MAXANG 
-                     FRDPPEL=FRDPP(L1,L)
-                     FRDPMEL=FRDPM(L1,L)
-                     DIACPL=DITAPL0(L1,ITAU)*AC(L1)
-                     DIACMI=DITAMI0(L1,ITAU)*AC(L1)
-                     XIPL=XIPL+FRDPPEL*DIACPL+FRDPMEL*DIACMI
-                     XIMI=XIMI+FRDPMEL*DIACPL+FRDPPEL*DIACMI 
-                  ENDDO
-               ENDDO
+               XIPL=OI(L,ITAU)
+               XIMI=OM(L,ITAU)
+               QXIPL=OQ(L,ITAU)
+               QXIMI=OQM(L,ITAU)
                XXPL=XIPL*X 
                XXMI=XIMI*X  
+               QXXPL=QXIPL*X
+               QXXMI=QXIMI*X
                SOUPL0(ITAU,L)=XXPL
                SOUMI0(ITAU,L)=XXMI
+               QSOUPL0(ITAU,L)=QXXPL
+               QSOUMI0(ITAU,L)=QXXMI
                SOUPL(ITAU,L)=XXPL+SOUPL(ITAU,L) 
                SOUMI(ITAU,L)=XXMI+SOUMI(ITAU,L)  
+               QSOUPL(ITAU,L)=QXXPL+QSOUPL(ITAU,L)
+               QSOUMI(ITAU,L)=QXXMI+QSOUMI(ITAU,L)
  185        CONTINUE 
             IF(XXPL.gt.1D-99.and.X.lt.XEMAX) THEN
                DIF=XXPL/SOUPL(MAXTAU,L)
@@ -1905,11 +2293,119 @@ c calculations of exact source function
       END     
 c***********************************************************************
 c geometrical factors depending of IGEOM 
+c Corrected slab transport, source product, and convergence diagnostics.
+      SUBROUTINE COMP_SCAN_STOP(DIF,N,CAP)
+      IMPLICIT NONE
+      DOUBLE PRECISION DIF,SCAN_DIF
+      INTEGER N,CAP,SCAN_ORDER,SCAN_CAP
+      COMMON/MSSCANSTOP/SCAN_DIF,SCAN_ORDER,SCAN_CAP
+      DIF=SCAN_DIF
+      N=SCAN_ORDER
+      CAP=SCAN_CAP
+      RETURN
+      END
+
+c***********************************************************************
+      SUBROUTINE COMP_SLAB_CHECK(NIN,NOUT,GMIN,GMAX,QLEAK)
+      IMPLICIT NONE
+#include "mscomppsq.inc"
+      DOUBLE PRECISION NIN,NOUT,GMIN,GMAX,QLEAK,G,Q,W
+      INTEGER IX,IA,JX,JA,L,K
+      NIN=0D0
+      NOUT=0D0
+      GMIN=1D99
+      GMAX=0D0
+      QLEAK=0D0
+      DO IX=1,MAXFRE
+         NIN=NIN+A(IX)*DINTEN(IX)
+         DO IA=1,MAXANG
+            L=IA+(IX-1)*MAXANG
+            NOUT=NOUT+A(IX)*AANG(IA)*UANG(IA)*
+     &           (DINTPL(L)+SUIPL(L)+SUIMI(L))
+            IF(XEN(IX).ge.1D-6.and.XEN(IX).le.1D0) THEN
+               G=0D0
+               Q=0D0
+               DO JX=1,MAXFRE
+                  DO JA=1,MAXANG
+                     K=JA+(JX-1)*MAXANG
+                     W=XEN(JX)*A(JX)*AANG(JA)/S0(IX)
+                     G=G+W*(FRDPP(L,K)+FRDPM(L,K))
+                     Q=Q+W*(FRDPP12(L,K)+FRDPM12(L,K))
+                  ENDDO
+               ENDDO
+               GMIN=MIN(GMIN,G)
+               GMAX=MAX(GMAX,G)
+               QLEAK=MAX(QLEAK,ABS(Q))
+            ENDIF
+         ENDDO
+      ENDDO
+      END
+
+c***********************************************************************
+      SUBROUTINE MSSLABFORMAL(SP,SM,IP,IM,H,ISC,IQ)
+      IMPLICIT NONE
+#include "mscomppsq.inc"
+      DOUBLE PRECISION SP(MAXTAU,LL),SM(MAXTAU,LL)
+      DOUBLE PRECISION IP(LL,MAXTAU),IM(LL,MAXTAU),H
+      DOUBLE PRECISION D,R,WU,WD,OM,INCOMING
+      INTEGER ISC,IQ,IX,IA,L,J
+      DO IX=1,MAXFRE
+         DO IA=1,MAXANG
+            L=IA+(IX-1)*MAXANG
+            D=S0(IX)*H/UANG(IA)
+            R=DEXP(-D)
+            IF(D.lt.1D-3) THEN
+               WU=D*(0.5D0+D*(-1D0/3D0+D*(1D0/8D0
+     &              +D*(-1D0/30D0+D/144D0))))/S0(IX)
+               WD=D*(0.5D0+D*(-1D0/6D0+D*(1D0/24D0
+     &              +D*(-1D0/120D0+D/720D0))))/S0(IX)
+            ELSE
+               OM=1D0-R
+               WU=(OM/D-R)/S0(IX)
+               WD=(1D0-OM/D)/S0(IX)
+            ENDIF
+            INCOMING=0D0
+            IF(ISC.eq.1.and.INPUT.eq.0.and.IQ.eq.0)
+     &           INCOMING=DINTEN(IX)
+            IP(L,1)=INCOMING
+            IM(L,MAXTAU)=0D0
+            DO J=2,MAXTAU
+               IF(ISC.eq.1.and.INPUT.eq.0) THEN
+                  IP(L,J)=R*IP(L,J-1)
+                  IM(L,MAXTAU-J+1)=0D0
+               ELSE
+                  IP(L,J)=R*IP(L,J-1)+WU*SP(J-1,L)+WD*SP(J,L)
+                  IM(L,MAXTAU-J+1)=R*IM(L,MAXTAU-J+2)
+     &                 +WU*SM(MAXTAU-J+2,L)+WD*SM(MAXTAU-J+1,L)
+               ENDIF
+            ENDDO
+         ENDDO
+      ENDDO
+      END
+
+c***********************************************************************
+      SUBROUTINE MSPOLPRODUCT(P,M,PQ,MQ,IP,IM,QP,QM,OP,OM)
+      IMPLICIT NONE
+#include "mscomppsq.inc"
+      DOUBLE PRECISION P(LL,LL),M(LL,LL),PQ(LL,LL),MQ(LL,LL)
+      DOUBLE PRECISION IP(LL,MAXTAU),IM(LL,MAXTAU)
+      DOUBLE PRECISION QP(LL,MAXTAU),QM(LL,MAXTAU)
+      DOUBLE PRECISION OP(LL,MAXTAU),OM(LL,MAXTAU)
+      CALL DGEMM('T','N',LL,MAXTAU,LL,1D0,P,LL,IP,LL,0D0,OP,LL)
+      CALL DGEMM('T','N',LL,MAXTAU,LL,1D0,M,LL,IM,LL,1D0,OP,LL)
+      CALL DGEMM('T','N',LL,MAXTAU,LL,1D0,PQ,LL,QP,LL,1D0,OP,LL)
+      CALL DGEMM('T','N',LL,MAXTAU,LL,1D0,MQ,LL,QM,LL,1D0,OP,LL)
+      CALL DGEMM('T','N',LL,MAXTAU,LL,1D0,M,LL,IP,LL,0D0,OM,LL)
+      CALL DGEMM('T','N',LL,MAXTAU,LL,1D0,P,LL,IM,LL,1D0,OM,LL)
+      CALL DGEMM('T','N',LL,MAXTAU,LL,1D0,MQ,LL,QP,LL,1D0,OM,LL)
+      CALL DGEMM('T','N',LL,MAXTAU,LL,1D0,PQ,LL,QM,LL,1D0,OM,LL)
+      END
+
       SUBROUTINE MSGEOMFAC(TAUVEC,T0TAUG,CINP,CINM,CEMP,CEMM)
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION CINP(MAXTAU,MAXTAU,MAXANG),
      1            CINM(MAXTAU,MAXTAU,MAXANG),CEMP(MAXTAU,MAXTAU,MAXANG),
@@ -2016,7 +2512,7 @@ c geometrical factors depending of IGEOM for DISK with HOLE geometry
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION CGRIN(MAXTAU,MAXTAU,MAXANG),
      2           CGREX(MAXTAU,MAXTAU,MAXANG),TAUVEC(MAXTAU)
@@ -2111,7 +2607,7 @@ c***********************************************************************
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION CINP(MAXTAU,MAXTAU,MAXANG),
      1 CINM(MAXTAU,MAXTAU,MAXANG),CEMP(MAXTAU,MAXTAU,MAXANG),
@@ -2198,7 +2694,7 @@ c FOR THE DISK WITH HOLES
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION CGRIN(MAXTAU,MAXTAU,MAXANG),
      2 CGREX(MAXTAU,MAXTAU,MAXANG),BGMIN(MAXTAU,MAXTAU,*),
@@ -2257,32 +2753,43 @@ c***********************************************************************
       SUBROUTINE MSCSRF  
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
-      DOUBLE PRECISION COMPHI11(MAXFRE),REDXX(NMU),DMUA(NMU),F2(NMU)   
+      INTEGER NRED
+      PARAMETER(NRED=8*MAXANG+1)
+      DOUBLE PRECISION COMPHI11(MAXFRE),REDXX(NRED),DMUA(NRED)
+      DOUBLE PRECISION F2(NRED),REDI(NRED),REDQ(NRED),REDU(NRED)
+      DOUBLE PRECISION F2I(NRED),F2Q(NRED),F2U(NRED)
 
       DOUBLE PRECISION CFI, COKL, CONS, DMUPM, DMUPP, ETA, ETA1
       DOUBLE PRECISION ETA12, ETA2, EXXJS, H3, DLN, PHI, PHKL, QMU, SI
       DOUBLE PRECISION SI1, SI12, SI2, SIKL, SM, SMU, SP, SUM, SUM1
       DOUBLE PRECISION SUM11M, SUM11P, SUM2, X, X1, XXR
+      DOUBLE PRECISION CIP,CIM,CQP,CQM,CUP,CUM
+      DOUBLE PRECISION RP11,RP12,RP21,RP22,RM11,RM12,RM21,RM22
+      DOUBLE PRECISION SUM12P,SUM21P,SUM22P,SUM12M,SUM21M,SUM22M
 
       INTEGER I, I1, IAU, ID, IX, J, J1, JSX, JX, JXMIN, K, K1, KE
-      INTEGER KE1, KETA, L, L1, LETA, NX
+      INTEGER KE1, KETA, L, L1, LETA, NX,NMT
 
       DOUBLE PRECISION PI, EPS
       DATA PI/3.141592653589792384D0/,EPS/1D-14/ 
 
       NX=MAXFRE 
+      NMT=NRED
 c-------------------------------------------------------------------------
 C CALCULATIONS OF ANGLE DEPENDENT REDISTRIBUTION FUNCTIONS EXPLICITELY FOR
 c (CSM+RT) CODE. 
 c-------------------------------------------------------------------------
       DLN=DLOG(1D1) 
       H3=PI*2D0 
-      DO 11 IAU=1,NMU
-         if(IAU.le.MAXANG) DMUA(IAU)=-UANG(MAXANG-IAU+1) 
-         if(IAU.gt.MAXANG) DMUA(IAU)=UANG(IAU-MAXANG) 
+      DO 11 IAU=1,NMT
+c Chebyshev-like scattering-angle table, independent of the much coarser
+c transfer ordinates.  Energy-changing kernels can be sharply localized in
+c cos(theta); using only +/-UANG here creates large false Q near mu=1.
+         DMUA(IAU)=-DCOS(PI*DFLOAT(IAU-1)/DFLOAT(NMT-1))
  11   CONTINUE 
+      FRDMU=0D0
 c------------------------------------------------------------------
 c begin  STAGE I 
 C mainly integrals over azimuth angle:
@@ -2290,26 +2797,50 @@ C mainly integrals over azimuth angle:
          DO L=1,LL
             FRDPP(L,L1)=0.D0
             FRDPM(L,L1)=0.D0
+            FRDPP12(L,L1)=0D0
+            FRDPP21(L,L1)=0D0
+            FRDPP22(L,L1)=0D0
+            FRDPM12(L,L1)=0D0
+            FRDPM21(L,L1)=0D0
+            FRDPM22(L,L1)=0D0
          ENDDO
       ENDDO
       JXMIN=1
       DO 400 IX=1,NX
          X=XEN(IX)
-         IF(IDISTF.eq.0) JXMIN=IX
+c All ordered energies: no nodal balance reconstruction.
          DO 300 JX=JXMIN,NX
             X1=XEN(JX)
 c here computation of R(x,x1,mu) 
-            DO 350 IAU=1,NMU 
+            DO 350 IAU=2,NMT-1
                QMU=1D0-DMUA(IAU) 
                IF(QMU.gt.EPS) THEN 
-                  CALL MSREDFUNC(X,X1,QMU,SMU) 
+                  CALL MSBINREDFUNC(X,JX,QMU,SMU,SI,CQP,CUP)
                ELSE 
                   SMU=0D0
+                  SI=0D0
+                  CQP=0D0
+                  CUP=0D0
                ENDIF 
                REDXX(IAU)=SMU  
-               FRDMU(JX,IX,IAU)=SMU 
+               REDI(IAU)=SI
+               REDQ(IAU)=CQP
+               REDU(IAU)=CUP
  350        CONTINUE 
-            CALL MSQSPLINE(DMUA,REDXX,NMU,1d30,1d30,F2)
+c Constant endpoint continuation avoids unconstrained cubic extrapolation
+c without evaluating the integrable forward singularity at cos(theta)=1.
+            REDXX(1)=REDXX(2)
+            REDI(1)=REDI(2)
+            REDQ(1)=REDQ(2)
+            REDU(1)=REDU(2)
+            REDXX(NMT)=REDXX(NMT-1)
+            REDI(NMT)=REDI(NMT-1)
+            REDQ(NMT)=REDQ(NMT-1)
+            REDU(NMT)=REDU(NMT-1)
+            CALL MSQSPLINE(DMUA,REDXX,NMT,1d30,1d30,F2)
+            CALL MSQSPLINE(DMUA,REDI,NMT,1d30,1d30,F2I)
+            CALL MSQSPLINE(DMUA,REDQ,NMT,1d30,1d30,F2Q)
+            CALL MSQSPLINE(DMUA,REDU,NMT,1d30,1d30,F2U)
 
             DO 200 KETA=1,MAXANG  
                K=KETA+(IX-1)*MAXANG   
@@ -2328,6 +2859,12 @@ c              DO 100 LETA=1,MAXANG
                   COKL=ETA*ETA1
                   SUM11P=0D0 
                   SUM11M=0D0
+                  SUM12P=0D0
+                  SUM21P=0D0
+                  SUM22P=0D0
+                  SUM12M=0D0
+                  SUM21M=0D0
+                  SUM22M=0D0
 c BEGIN DELTA (azimuth) INTEGRATION LOOP
                   DO 50 ID=1,NS
                      PHI=UGS(ID)*PI 
@@ -2335,20 +2872,42 @@ c BEGIN DELTA (azimuth) INTEGRATION LOOP
                      PHKL=CFI*SIKL
 c BEGIN CALN. OF  S+- (+mu,-mu') = S-+ (-mu,+mu') BLOCK MATRIX:
                      DMUPM=-COKL+PHKL
-                     CALL MSQSPLINT(DMUA,REDXX,F2,NMU,DMUPM,SM)
+                     CALL MSQSPLINT(DMUA,REDXX,F2,NMT,DMUPM,SM)
+                     CALL MSQSPLINT(DMUA,REDI,F2I,NMT,DMUPM,CIM)
+                     CALL MSQSPLINT(DMUA,REDQ,F2Q,NMT,DMUPM,CQM)
+                     CALL MSQSPLINT(DMUA,REDU,F2U,NMT,DMUPM,CUM)
+                     CALL MSPOLBLOCK(ETA,-ETA1,DMUPM,PHI,SM,CIM,CQM,CUM,
+     &                    RM11,RM12,RM21,RM22)
 c END CALN. OF  S+- (+mu,-mu') = S-+ (-mu,+mu') BLOCK MATRIX.
 c BEGIN CALN. OF  S++ (+mu,+mu') = S-- (-mu,-mu') BLOCK MATRIX:
                      DMUPP=COKL+PHKL
-                     CALL MSQSPLINT(DMUA,REDXX,F2,NMU,DMUPP,SP)
+                     CALL MSQSPLINT(DMUA,REDXX,F2,NMT,DMUPP,SP)
+                     CALL MSQSPLINT(DMUA,REDI,F2I,NMT,DMUPP,CIP)
+                     CALL MSQSPLINT(DMUA,REDQ,F2Q,NMT,DMUPP,CQP)
+                     CALL MSQSPLINT(DMUA,REDU,F2U,NMT,DMUPP,CUP)
+                     CALL MSPOLBLOCK(ETA,ETA1,DMUPP,PHI,SP,CIP,CQP,CUP,
+     &                    RP11,RP12,RP21,RP22)
 c END CALN. OF  S++ (+mu,+mu') = S-- (-mu,-mu') BLOCK MATRIX.
                      SUM11P=SUM11P+SP*AGS(ID)
                      SUM11M=SUM11M+SM*AGS(ID)
+                     SUM12P=SUM12P+RP12*AGS(ID)
+                     SUM21P=SUM21P+RP21*AGS(ID)
+                     SUM22P=SUM22P+RP22*AGS(ID)
+                     SUM12M=SUM12M+RM12*AGS(ID)
+                     SUM21M=SUM21M+RM21*AGS(ID)
+                     SUM22M=SUM22M+RM22*AGS(ID)
  50               CONTINUE              
 c END azimuth INTEGRATION LOOP 
 c 
 c--------------------------------------------------------------------------
                   FRDPP(K1,K)=DMAX1(H3*SUM11P,0D0)
                   FRDPM(K1,K)=DMAX1(H3*SUM11M,0D0)
+                  FRDPP12(K1,K)=H3*SUM12P
+                  FRDPP21(K1,K)=H3*SUM21P
+                  FRDPP22(K1,K)=H3*SUM22P
+                  FRDPM12(K1,K)=H3*SUM12M
+                  FRDPM21(K1,K)=H3*SUM21M
+                  FRDPM22(K1,K)=H3*SUM22M
 c CONSTRUCTION OF A PART OF THE REDISTRIBUTION MATRICES FRD's IS OVER.
  100           CONTINUE 
  200        CONTINUE 
@@ -2357,112 +2916,27 @@ c CONSTRUCTION OF A PART OF THE REDISTRIBUTION MATRICES FRD's IS OVER.
 c end of STAGE I
 c---------------
 c------------------------------------------------------------------
-c begin  STAGE II 
-c CONSTRUCTION OF FULL STRUCTURE OF FRD's IS DONE BELOW BY EXPLOITING THE
-c SYMMETRY PROPERTIES OF THE CSM.
-c ATTENTION! DO NOT CHANGE THE ORDER of LOOPS !!! 
-c power-law electrons 
-      IF(IDISTF.NE.0) THEN
-         DO 180 I=1,NX
-            X=XEN(I)
-            DO 170 J=1,MAXANG
-               K=J+(I-1)*MAXANG
-               DO 160 I1=1,NX
-                  X1=XEN(I1)
-                  XXR=X/X1
-                  KE1=J+(I1-1)*MAXANG
-                  DO 150 J1=1,MAXANG
-                     KE=J1+(I-1)*MAXANG
-                     K1=J1+(I1-1)*MAXANG
-                     IF(J1.gt.J) THEN
-                        FRDPP(K1,K)=FRDPP(KE1,KE)*XXR
-                        FRDPM(K1,K)=FRDPM(KE1,KE)*XXR
-                     ELSE
-                        FRDPP(K1,K)=FRDPP(K1,K)*XXR
-                        FRDPM(K1,K)=FRDPM(K1,K)*XXR
-                     ENDIF
- 150              CONTINUE
-c     END OF mu' LOOP
- 160           CONTINUE
-c     END OF X' LOOP
- 170        CONTINUE
-c     END OF mu LOOP
- 180     CONTINUE
-c     END OF X LOOP
-         do I=1,NX
-            do I1=1,NX
-               do IAU=1,NMU 
-                  FRDMU(I1,I,IAU)=FRDMU(I1,I,IAU)*XEN(I)/XEN(I1)
-               enddo
-            enddo
-         enddo
-c--------------------------------------------------------------------------
-      ELSE 
-c Maxwellian electrons 
-c This line included to suppress a compiler warning
-         EXXJS=0.0
-         DO 280 I1=1,NX
-            X1=XEN(I1)
-            DO 270 I=1,NX
-               X=XEN(I)
-               XXR=X/X1 
-               JSX=I1+I*(I-1)/2
-               IF(I.GT.I1)  EXXJS=EXXY(JSX)*XXR 
-               DO 260 J=1,MAXANG
-                  K=J+(I-1)*MAXANG
-                  KE1=J+(I1-1)*MAXANG
-                  DO 250 J1=1,MAXANG
-                     KE=J1+(I-1)*MAXANG
-                     K1=J1+(I1-1)*MAXANG
-                     IF(I.LE.I1) THEN
-                        IF(J1.gt.J) THEN
-                           FRDPP(K1,K)=FRDPP(KE1,KE)*XXR 
-                           FRDPM(K1,K)=FRDPM(KE1,KE)*XXR 
-                        ELSE
-                           FRDPP(K1,K)=FRDPP(K1,K)*XXR
-                           FRDPM(K1,K)=FRDPM(K1,K)*XXR
-                        ENDIF
-                     ELSE 
-                        IF(J1.lt.J) THEN
-                           FRDPP(K1,K)=FRDPP(KE,KE1)*EXXJS
-                           FRDPM(K1,K)=FRDPM(KE,KE1)*EXXJS
-                        ELSE 
-                           FRDPP(K1,K)=FRDPP(K,K1)*EXXJS
-                           FRDPM(K1,K)=FRDPM(K,K1)*EXXJS
-                        ENDIF 
-                     ENDIF 
-c--------------------------------------------------------------------------
-c--------------------------------------------------------------------------
- 250              CONTINUE
-c     END OF mu' LOOP
- 260           CONTINUE
-c     END OF mu LOOP
- 270        CONTINUE
-c     END OF X LOOP
- 280     CONTINUE
-c     END OF X' LOOP
+c Angular reciprocity only; energy pairs were computed directly.
+      DO I=1,NX
          DO I1=1,NX
-            X1=XEN(I1)
-            DO I=1,NX
-               X=XEN(I)
-               XXR=X/X1
-               JSX=I1+I*(I-1)/2
-               IF(I.GT.I1) THEN
-                  EXXJS=EXXY(JSX)*XXR
-                  DO IAU=1,NMU 
-                     FRDMU(I1,I,IAU)=FRDMU(I,I1,IAU)*EXXJS 
-                  ENDDO 
-               ELSE
-                  DO IAU=1,NMU 
-                     FRDMU(I1,I,IAU)=FRDMU(I1,I,IAU)*XXR 
-                  ENDDO 
-               ENDIF
-            ENDDO 
-         ENDDO 
-
-      ENDIF 
-c NOW WE SPECIFICALLY USE THE SYMMETRY RELATIONS: FRDMP=FRDPM; FRDMM=FRDPP:
-c end of STAGE II
+            DO J=1,MAXANG
+               K=J+(I-1)*MAXANG
+               KE1=J+(I1-1)*MAXANG
+               DO J1=J+1,MAXANG
+                  K1=J1+(I1-1)*MAXANG
+                  KE=J1+(I-1)*MAXANG
+                  FRDPP(K1,K)=FRDPP(KE1,KE)
+                  FRDPP12(K1,K)=FRDPP21(KE1,KE)
+                  FRDPP21(K1,K)=FRDPP12(KE1,KE)
+                  FRDPP22(K1,K)=FRDPP22(KE1,KE)
+                  FRDPM(K1,K)=FRDPM(KE1,KE)
+                  FRDPM12(K1,K)=FRDPM21(KE1,KE)
+                  FRDPM21(K1,K)=FRDPM12(KE1,KE)
+                  FRDPM22(K1,K)=FRDPM22(KE1,KE)
+               ENDDO
+            ENDDO
+         ENDDO
+      ENDDO
 c begin  STAGE III
 c CHECKING THE NORMALIZATION OF THE ANGLE DEPENDENT GENERAL  CSM 
 c REDISTRIBUTION MATRIX:
@@ -2519,6 +2993,12 @@ c NOW THE RENORMALIZATION OF THE FULL ANGLE DEPENDENT  <CSM>
 c REDISTRIBUTION MATRICES  FRDPP,FRDPM 
                   FRDPP(K1,K)=FRDPP(K1,K) * CONS
                   FRDPM(K1,K)=FRDPM(K1,K) * CONS
+                  FRDPP12(K1,K)=FRDPP12(K1,K)*CONS
+                  FRDPP21(K1,K)=FRDPP21(K1,K)*CONS
+                  FRDPP22(K1,K)=FRDPP22(K1,K)*CONS
+                  FRDPM12(K1,K)=FRDPM12(K1,K)*CONS
+                  FRDPM21(K1,K)=FRDPM21(K1,K)*CONS
+                  FRDPM22(K1,K)=FRDPM22(K1,K)*CONS
                ENDDO
             ENDDO
          ENDDO
@@ -2532,6 +3012,43 @@ c----------------
       RETURN
       END
 
+c Axisymmetric azimuthal rotation of the mono-directional Compton Mueller
+c matrix into the meridian-plane Stokes basis.  The compact R22 expression
+c is algebraically identical to equation (A5) of Poutanen & Svensson (1996).
+      SUBROUTINE MSPOLBLOCK(MU,MU1,COST,PHI,C,CI,CQ,CU,
+     &      R11,R12,R21,R22)
+      IMPLICIT NONE
+      DOUBLE PRECISION MU,MU1,COST,PHI,C,CI,CQ,CU
+      DOUBLE PRECISION R11,R12,R21,R22
+      DOUBLE PRECISION S,S1,ST,CP,CH,CH1,SH,SH1,C2H,C2H1,S2H,S2H1
+      S=DSQRT(DMAX1(0D0,1D0-MU*MU))
+      S1=DSQRT(DMAX1(0D0,1D0-MU1*MU1))
+      ST=DSQRT(DMAX1(0D0,1D0-COST*COST))
+      R11=C
+      IF(ST.lt.1D-14.or.S.lt.1D-14.or.S1.lt.1D-14) THEN
+         CH=1D0
+         CH1=1D0
+         SH=0D0
+         SH1=0D0
+      ELSE
+         CP=DCOS(PHI)
+         CH=(MU1-MU*COST)/(ST*S)
+         CH1=(MU-MU1*COST)/(ST*S1)
+         CH=DMAX1(-1D0,DMIN1(1D0,CH))
+         CH1=DMAX1(-1D0,DMIN1(1D0,CH1))
+         SH=-S1*DSIN(PHI)/ST
+         SH1=S*DSIN(PHI)/ST
+      ENDIF
+      C2H=2D0*CH*CH-1D0
+      C2H1=2D0*CH1*CH1-1D0
+      S2H=2D0*SH*CH
+      S2H1=2D0*SH1*CH1
+      R12=CI*C2H1
+      R21=CI*C2H
+      R22=CQ*C2H*C2H1+CU*S2H*S2H1
+      RETURN
+      END
+
 
 c***********************************************************************
 C  calculation of  frequencies 
@@ -2539,7 +3056,7 @@ C  calculation of  frequencies
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION XLMIN, HX, DLN, XL, X, XEV
 
@@ -2566,7 +3083,7 @@ C  calculation of cross-section S0(x) and auxiliary quantities
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION XL, X, YXX, AB, X1
 
@@ -2608,7 +3125,7 @@ c eq. (3.4.1) in Nagirner & Poutanen 1994
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
       INCLUDE 'mscomppsj.inc'
 
       DOUBLE PRECISION X, AB, EPS, DL21, SUM, DLU, DLG, GP, GPZ
@@ -2645,7 +3162,7 @@ c eq. (3.4.1) in Nagirner & Poutanen 1994
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
       INCLUDE 'mscomppsj.inc'
 
       DOUBLE PRECISION X, AB, EPS
@@ -2711,7 +3228,7 @@ C
 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION X, AB, E
       DOUBLE PRECISION U, AEL, AGL, G1, GY1, YG1, DZ1, DR1, Z1, GP1, ZP1
@@ -2891,7 +3408,7 @@ C* * 8. GAMSQUA=1D0+3/y*[K_3(y)/K_2(y)]
 C***
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
       INCLUDE 'mscomppsj.inc'
 
       DOUBLE PRECISION DK(20)  
@@ -3130,7 +3647,7 @@ C
       SUBROUTINE MSREDFUNC(X,X1,QM,S) 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
       INCLUDE 'mscomppsj.inc'
 
       DOUBLE PRECISION X, X1, QM, S, SM, SP
@@ -3182,7 +3699,7 @@ C
       SUBROUTINE MSMAXGALA(X,X1,QM,S) 
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
       INCLUDE 'mscomppsj.inc'
 
       DOUBLE PRECISION X, X1, QM, S
@@ -3215,7 +3732,7 @@ C
       SUBROUTINE MSMAXCUT(X,X1,QM,S)
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
       INCLUDE 'mscomppsj.inc'
 
       DOUBLE PRECISION X, X1, QM, S
@@ -3267,7 +3784,7 @@ C need in advance calling the COMXX(X,X1) prosedure
       SUBROUTINE MSPOWMATR(X,X1,QM,S)
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
       INCLUDE 'mscomppsj.inc'
 
       DOUBLE PRECISION X, X1, QM, S
@@ -3395,6 +3912,123 @@ C
       ENDIF 
       RETURN                                 
       END                                                              
+
+c***********************************************************************
+c Four thermal redistribution functions entering the axisymmetric I/Q
+c Mueller matrix (Poutanen & Svensson 1996, Appendix A).  The scalar
+c routine above is retained verbatim; these companions make the previously
+c documented RI,RQ,RU outputs explicit for Maxwellian electrons.
+      SUBROUTINE MSREDFUNC4(X,X1,QM,S,SI,SQ,SU)
+      IMPLICIT NONE
+#include "mscomppsq.inc"
+      INCLUDE 'mscomppsj.inc'
+      DOUBLE PRECISION X,X1,QM,S,SI,SQ,SU
+      DOUBLE PRECISION XOLD,X1OLD
+      SAVE XOLD,X1OLD
+      DATA XOLD/-1D0/,X1OLD/-1D0/
+      IF(IDISTF.ne.0) STOP 'polarized compPSc supports Maxwellian electrons'
+      IF(X.ne.XOLD.or.X1.ne.X1OLD) THEN
+         CALL MSCOMX(X,X1)
+         XOLD=X
+         X1OLD=X1
+      ENDIF
+      CALL MSCOMXM(QM)
+      CALL MSMAXGALA4(X,X1,QM,S,SI,SQ,SU)
+      RETURN
+      END
+
+      SUBROUTINE MSMAXGALA4(X,X1,QM,S,SI,SQ,SU)
+      IMPLICIT NONE
+#include "mscomppsq.inc"
+      INCLUDE 'mscomppsj.inc'
+      DOUBLE PRECISION X,X1,QM,S,SI,SQ,SU
+      DOUBLE PRECISION CONST,DGZ,EXGST,YGST,R,RI,RQ,RU
+      INTEGER I
+      DOUBLE PRECISION PI332
+      DATA PI332/0.2984155182973039D-01/
+      EXGST=0D0
+      YGST=YE*GST1
+      IF(YGST.lt.7D1) EXGST=DEXP(-YGST)
+      CONST=PI332*YKY*EXGST
+      S=0D0
+      SI=0D0
+      SQ=0D0
+      SU=0D0
+      IF(CONST.EQ.0D0) RETURN
+      DO I=1,N0
+         DGZ=UL(I)*Y1
+         G=DGZ+GST
+         CALL MSCOMWG
+         CALL MSRDSTRB4(X,X1,QM,R,RI,RQ,RU)
+         S=S+R*AL(I)
+         SI=SI+RI*AL(I)
+         SQ=SQ+RQ*AL(I)
+         SU=SU+RU*AL(I)
+      ENDDO
+      S=S*CONST
+      SI=SI*CONST
+      SQ=SQ*CONST
+      SU=SU*CONST
+      RETURN
+      END
+
+      SUBROUTINE MSRDSTRB4(X,X1,QM,R,RI,RQ,RU)
+      IMPLICIT NONE
+      INCLUDE 'mscomppsj.inc'
+      DOUBLE PRECISION X,X1,QM,R,RI,RQ,RU
+      DOUBLE PRECISION AA,AA1,CA,CC,C,D,DG,GX,U,U2,UQ,UQQ,V
+      DOUBLE PRECISION QDEN,RDEN
+      REAL*16 U16,U216,UQ16,UQQ16,V16,Q16,Q216,QD16,RD16
+      REAL*16 CA16,CC16,RU16
+      IF(QM.lt.1D-10) THEN
+         R=0D0
+         RI=0D0
+         RQ=0D0
+         RU=0D0
+         RETURN
+      ENDIF
+      CALL MSRDSTRB(X,X1,QM,R)
+      AA=DSQRT(Z2-(GT-X)*X+QMT)
+      AA1=DSQRT(Z2+(GT+X1)*X1+QMT)
+      U=SX*(GT-DX)/(AA+AA1)
+      U2=U*U
+      V=AA*AA1
+      UQQ=U2-Q2
+c Near the kinematic boundary obtain u^2-Q^2 without subtracting nearly
+c equal numbers (Nagirner & Poutanen 1993, eq. 60; notation follows the
+c stable scalar branch in MSRDSTRB).
+      IF(U-Q.lt.3D-1) THEN
+         GX=G-DX
+         DG=G-GST
+         C=2D0/(G*GX+RS+T-QO+V)
+         D=2D0*(GX+GST)*DG
+         UQQ=QS*C*D
+      ENDIF
+      QDEN=QO
+      RDEN=RS
+      U16=U
+      U216=U2
+      UQQ16=UQQ
+      V16=V
+      Q16=Q
+      Q216=Q2
+      QD16=QDEN
+      RD16=RDEN
+      CA16=U16*UQQ16*(U216+5Q0*V16)/
+     &     (2Q0*QD16*QD16*V16*V16*V16)
+     &     +U16*Q216/(QD16*QD16*V16*V16)
+      CC16=U16/(V16*QD16)*(UQQ16/(RD16*QD16)-2Q0)
+      UQ16=UQQ16/(U16+Q16)
+      RU16=2Q0/Q16+2Q0*UQ16/(RD16*QD16)*
+     &     (UQ16/(RD16*QD16)*(2Q0*Q16+U16)-4Q0)
+     &     +2Q0*U16/(V16*QD16)+2Q0*CC16
+      CA=DBLE(CA16)
+      CC=DBLE(CC16)
+      RU=DBLE(RU16)
+      RI=DBLE(CA16+CC16)
+      RQ=DBLE(RU16+CA16)
+      RETURN
+      END
 
 
 c***********************************************************************
@@ -3567,11 +4201,8 @@ c***********************************************************************
       SUBROUTINE MSQSPLINE(X,Y,N,YP1,YPN,Y2)
       IMPLICIT NONE
 
-      INTEGER NMAX
-      PARAMETER (NMAX=500)
-
       INTEGER N
-      DOUBLE PRECISION X(N),Y(N),Y2(N),U(NMAX)
+      DOUBLE PRECISION X(N),Y(N),Y2(N),U(N)
       DOUBLE PRECISION YP1, YPN, P, QN, SIG, UN
 
       INTEGER I, K
@@ -3638,11 +4269,8 @@ c polinomial interpolation and extrapolation
       SUBROUTINE MSPOLINTQ(XA,YA,N,X,Y,DY)
       IMPLICIT NONE
 
-      INTEGER NMAX
-      PARAMETER (NMAX=10) 
-
       INTEGER N
-      DOUBLE PRECISION XA(N),YA(N),C(NMAX),D(NMAX)
+      DOUBLE PRECISION XA(N),YA(N),C(N),D(N)
       DOUBLE PRECISION X, Y, DY, DEN, DIF, DIFT, HO, HP, W
 
       INTEGER I, M, NS
@@ -3773,7 +4401,7 @@ c**************************************************
       SUBROUTINE MSAGUEGALA(NL,E)             
       IMPLICIT NONE
 
-      INCLUDE 'mscomppsq.inc'
+#include "mscomppsq.inc"
 
       DOUBLE PRECISION E, DLE, EXPUL
 
@@ -4440,3 +5068,84 @@ C
       
 C--------------------------------------------------------------------------
 C--------------------------------------------------------------------------
+
+c Product integration of log-energy linear interpolation basis functions.
+      SUBROUTINE MSBINREDFUNC(X,JX,QM,S,SI,SQ,SU)
+      IMPLICIT NONE
+#include "mscomppsq.inc"
+      INTEGER JX,L,R,M,IG,NQ
+      PARAMETER(NQ=8)
+      DOUBLE PRECISION X,QM,S,SI,SQ,SU,S1,I1,Q1,U1
+      DOUBLE PRECISION Z(NQ),W(NQ),YL,YR,Y,HAT,WT,X1,NORM
+      SAVE Z,W
+      DATA Z/-9.60289856497536176D-01,-7.96666477413626728D-01,-5.25532409916328991D-01,-1.83434642495649808D-01,1.83434642495649808D-01,5.25532409916328991D-01,7.96666477413626728D-01,9.60289856497536176D-01/
+      DATA W/1.01228536290376370D-01,2.22381034453374177D-01,3.13706645877887436D-01,3.62683783378362046D-01,3.62683783378362046D-01,3.13706645877887436D-01,2.22381034453374177D-01,1.01228536290376370D-01/
+      S=0D0
+      SI=0D0
+      SQ=0D0
+      SU=0D0
+      NORM=0D0
+      DO M=MAX(1,JX-1),MIN(MAXFRE-1,JX)
+         L=M
+         R=M+1
+         YL=DLOG(XEN(L))
+         YR=DLOG(XEN(R))
+         DO IG=1,NQ
+            Y=0.5D0*((YR+YL)+(YR-YL)*Z(IG))
+            IF(JX.EQ.L) THEN
+               HAT=0.5D0*(1D0-Z(IG))
+            ELSE
+               HAT=0.5D0*(1D0+Z(IG))
+            ENDIF
+            WT=0.5D0*(YR-YL)*W(IG)*HAT
+            X1=DEXP(Y)
+            CALL MSREDFUNC4(X,X1,QM,S1,I1,Q1,U1)
+            S=S+WT*(X/X1)*S1
+            SI=SI+WT*(X/X1)*I1
+            SQ=SQ+WT*(X/X1)*Q1
+            SU=SU+WT*(X/X1)*U1
+            NORM=NORM+WT
+         ENDDO
+      ENDDO
+      S=S/NORM
+      SI=SI/NORM
+      SQ=SQ/NORM
+      SU=SU/NORM
+      END
+
+c Independent isotropic Wien fixed-point test of the discretized operator.
+      SUBROUTINE COMP_PRODUCT_AUDIT(BAL,QBAL,NEG)
+      IMPLICIT NONE
+#include "mscomppsq.inc"
+      DOUBLE PRECISION BAL,QBAL,NEG,V(LL),W(LL),R(LL),T(LL)
+      INTEGER I,J,K,L
+      DOUBLE PRECISION DEN,GAIN,LOSS
+      DO I=1,MAXFRE
+         DO J=1,MAXANG
+            K=J+(I-1)*MAXANG
+            V(K)=XEN(I)**3*DEXP(-YE*XEN(I))
+            W(K)=AC(K)*V(K)
+         ENDDO
+      ENDDO
+      R=MATMUL(TRANSPOSE(FRDPP),W)+MATMUL(TRANSPOSE(FRDPM),W)
+      T=MATMUL(TRANSPOSE(FRDPP21),W)+MATMUL(TRANSPOSE(FRDPM21),W)
+      BAL=0D0
+      QBAL=0D0
+      NEG=0D0
+      DO I=1,MAXFRE
+         IF(YE*XEN(I).LT.0.1D0.OR.YE*XEN(I).GT.10D0) CYCLE
+         DO J=1,MAXANG
+            K=J+(I-1)*MAXANG
+            DEN=S0(I)*V(K)
+            BAL=MAX(BAL,ABS(XEN(I)*R(K)/DEN-1D0))
+            QBAL=MAX(QBAL,ABS(XEN(I)*T(K)/DEN))
+            GAIN=0D0
+            LOSS=0D0
+            DO L=1,LL
+               GAIN=GAIN+AC(L)*(ABS(FRDPP(L,K))+ABS(FRDPM(L,K)))
+               LOSS=LOSS+AC(L)*(MIN(0D0,FRDPP(L,K))+MIN(0D0,FRDPM(L,K)))
+            ENDDO
+            IF(GAIN.GT.0D0) NEG=MAX(NEG,ABS(LOSS)/GAIN)
+         ENDDO
+      ENDDO
+      END

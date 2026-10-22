@@ -16,9 +16,18 @@ C NT=MAXTAU - number of points in trapec formula
 C            (integration over  optical depth)
       INTEGER MAXTAU, MAXFRE, MAXANG, NSP, ND
       INTEGER KK, LL, NEX, NCX, IPC, NMU
-      PARAMETER(MAXTAU=25)
+#ifndef COMP_POL_MAXTAU
+#define COMP_POL_MAXTAU 101
+#endif
+#ifndef COMP_POL_MAXFRE
+#define COMP_POL_MAXFRE 220
+#endif
+#ifndef COMP_POL_MAXANG
+#define COMP_POL_MAXANG 7
+#endif
+      PARAMETER(MAXTAU=COMP_POL_MAXTAU)
 c      PARAMETER(MAXFRE=88,MAXANG=5)
-      PARAMETER(MAXFRE=100,MAXANG=5) 
+      PARAMETER(MAXFRE=COMP_POL_MAXFRE,MAXANG=COMP_POL_MAXANG)
       PARAMETER(NSP=2*MAXFRE,ND=1)
       PARAMETER(KK=MAXFRE*MAXANG,LL=ND*KK)
       PARAMETER(NEX=MAXFRE*(MAXFRE+1)/2,NCX=MAXANG*(MAXANG+1)/2)
@@ -47,10 +56,28 @@ c NMU - number of points in mu (-1,1) in CSRF
       COMMON/MSQQRES/DINTPL,DINTMI,SUIPL,SUIMI 
       SAVE /MSQQRES/
 
-      DOUBLE PRECISION FRDPP(LL,LL),FRDPM(LL,LL),FRDX(IPC,IPC)
-      DOUBLE PRECISION FRDS(IPC,IPC),FRDMU(MAXFRE,MAXFRE,NMU) 
+      DOUBLE PRECISION, POINTER, CONTIGUOUS :: FRDPP(:,:),FRDPM(:,:)
+      DOUBLE PRECISION, POINTER, CONTIGUOUS :: FRDX(:,:),FRDS(:,:)
+      DOUBLE PRECISION, POINTER, CONTIGUOUS :: FRDMU(:,:,:)
       COMMON/MSQQRST/FRDPP,FRDPM,FRDX,FRDS,FRDMU
       SAVE /MSQQRST/
+
+c Polarized Compton redistribution blocks.  FRDPP/FRDPM above are R11.
+c The first/second suffix is the output/input Stokes index (I=1,Q=2).
+      DOUBLE PRECISION, POINTER, CONTIGUOUS :: FRDPP12(:,:)
+      DOUBLE PRECISION, POINTER, CONTIGUOUS :: FRDPP21(:,:),FRDPP22(:,:)
+      DOUBLE PRECISION, POINTER, CONTIGUOUS :: FRDPM12(:,:)
+      DOUBLE PRECISION, POINTER, CONTIGUOUS :: FRDPM21(:,:),FRDPM22(:,:)
+      COMMON/MSQPOLR/FRDPP12,FRDPP21,FRDPP22,
+     &               FRDPM12,FRDPM21,FRDPM22
+      SAVE /MSQPOLR/
+
+c Emergent polarized intensities.  Q>0 follows Poutanen & Svensson (1996):
+c electric vector parallel to the slab normal.  The Python interface exposes
+c both this native convention and the sign-flipped project convention.
+      DOUBLE PRECISION QSUIPL(LL),QSUIMI(LL)
+      COMMON/MSQPOLRES/QSUIPL,QSUIMI
+      SAVE /MSQPOLRES/
 
       DOUBLE PRECISION A(MAXFRE),UANG(MAXANG),AANG(MAXANG),AC(LL)
       DOUBLE PRECISION AINT(LL),CINT(LL)
